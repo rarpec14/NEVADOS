@@ -4,8 +4,8 @@
 // ==============================================
 // Para reducir parches sin datos (ej. 2002):
 // 1) fusiona L5/L7/L8,
-// 2) usa ventana temporal +/- años,
-// 3) usa percentil en vez de promedio,
+// 2) usa meses secos (junio-julio-agosto),
+// 3) usa mediana en vez de media/percentil,
 // 4) integra ALTURA (DEM) como variable adicional.
 
 var ndsiVis = {
@@ -31,8 +31,8 @@ var scriptId = 'IS_NDSI_LANDSAT7';
 var startYear = 2000;
 var endYear = 2013;
 var cloudCoverMax = 60;
-var temporalPaddingYears = 1; // 1 => usa [año-1, año+1]
-var ndsiPercentile = 60;
+var drySeasonStartMonth = 6;
+var drySeasonEndMonth = 8;
 var noDataValue = -9999;
 
 // Umbrales para clases
@@ -115,18 +115,21 @@ function maskAndScaleL8(image) {
 function buildCollection(start, end) {
   var l5 = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
     .filterDate(start, end)
+    .filter(ee.Filter.calendarRange(drySeasonStartMonth, drySeasonEndMonth, 'month'))
     .filterBounds(studyArea)
     .filter(ee.Filter.lt('CLOUD_COVER', cloudCoverMax))
     .map(maskAndScaleL57);
 
   var l7 = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
     .filterDate(start, end)
+    .filter(ee.Filter.calendarRange(drySeasonStartMonth, drySeasonEndMonth, 'month'))
     .filterBounds(studyArea)
     .filter(ee.Filter.lt('CLOUD_COVER', cloudCoverMax))
     .map(maskAndScaleL57);
 
   var l8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
     .filterDate(start, end)
+    .filter(ee.Filter.calendarRange(drySeasonStartMonth, drySeasonEndMonth, 'month'))
     .filterBounds(studyArea)
     .filter(ee.Filter.lt('CLOUD_COVER', cloudCoverMax))
     .map(maskAndScaleL8);
@@ -151,18 +154,18 @@ function buildClasses(ndsiImage, elevImage) {
 }
 
 function processAndExportYear(year) {
-  var start = ee.Date.fromYMD(year, 1, 1).advance(-temporalPaddingYears, 'year');
-  var end = ee.Date.fromYMD(year + 1, 1, 1).advance(temporalPaddingYears, 'year');
+  var start = ee.Date.fromYMD(year, 1, 1);
+  var end = ee.Date.fromYMD(year + 1, 1, 1);
 
   var collection = buildCollection(start, end);
   var count = collection.size();
-  print('Año ' + year + ' - imágenes usadas:', count);
+  print('Año ' + year + ' (jun-jul-ago) - imágenes usadas:', count);
 
   var ndsiYear = ee.Image(
     ee.Algorithms.If(
       count.gt(0),
       collection.select('NDSI')
-        .reduce(ee.Reducer.percentile([ndsiPercentile]))
+        .median()
         .rename('NDSI')
         .clip(studyArea),
       ee.Image(0).rename('NDSI').clip(studyArea).selfMask()
@@ -230,4 +233,5 @@ if (exportElevationBand) {
 
 print('Script activo:', scriptId);
 print('ALTURA integrada: minElevationGlacierM =', minElevationGlacierM);
+print('Meses secos usados:', drySeasonStartMonth, 'a', drySeasonEndMonth, '(junio-agosto)');
 print('TIP: para recortar más el área, pon useChimborazoPolygon = false y dibuja geometry con la herramienta de polígono.');
