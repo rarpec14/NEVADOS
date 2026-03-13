@@ -1,11 +1,11 @@
 // ==============================================
 // Cálculo y exportación anual de NDSI para nevado Chimborazo
-// (Landsat 7 C2 L2 Surface Reflectance)
+// (Landsat Collection 2 Level 2 Surface Reflectance)
 // ==============================================
-// Nota clave para SR (Surface Reflectance) en LE07/C02/T1_L2:
-// - GREEN = SR_B2
-// - SWIR1 = SR_B5  (recomendado para NDSI)
-// - SWIR2 = SR_B7  (NO es el estándar para NDSI)
+// Para reducir parches sin datos (ej. 2002):
+// 1) fusiona L5/L7/L8,
+// 2) usa ventana temporal +/- años,
+// 3) usa percentil en vez de promedio.
 
 var ndsiVis = {
   min: -1,
@@ -13,8 +13,20 @@ var ndsiVis = {
   palette: ['blue', 'white', 'green']
 };
 
-// 1) AOI fijo: Chimborazo (puedes ajustar coordenadas si quieres un recorte más fino)
+// --- Configuración principal ---
+var startYear = 2000;
+var endYear = 2013;
+var cloudCoverMax = 60;
+var temporalPaddingYears = 1; // 1 => usa [año-1, año+1]
+var ndsiPercentile = 60;
+var noDataValue = -9999;
+
+// AOI
+// true: usa polígono fijo Chimborazo
+// false: usa geometry/roi/aoi dibujada por ti en GEE
 var useChimborazoPolygon = true;
+
+// Polígono base Chimborazo (puedes reemplazarlo por uno más pequeño)
 var chimborazoPolygon = ee.Geometry.Polygon([
   [
     [-78.92, -1.40],
@@ -25,64 +37,93 @@ var chimborazoPolygon = ee.Geometry.Polygon([
   ]
 ]);
 
-// Prioridad de AOI: Chimborazo -> geometry -> roi -> aoi -> extensión actual del mapa
+// Prioridad AOI: Chimborazo fijo -> geometry -> roi -> aoi -> bounds de mapa
 var studyArea = useChimborazoPolygon
   ? chimborazoPolygon
   : ((typeof geometry !== 'undefined' && geometry) ||
-    (typeof roi !== 'undefined' && roi) ||
-    (typeof aoi !== 'undefined' && aoi) ||
-    null);
+     (typeof roi !== 'undefined' && roi) ||
+     (typeof aoi !== 'undefined' && aoi) ||
+     null);
 
 if (!studyArea) {
   studyArea = ee.Geometry.Rectangle(Map.getBounds(), null, false);
-  print('Aviso: no se encontró AOI. Se usa la extensión actual del mapa.');
+  print('Aviso: no se encontró geometry/roi/aoi. Se usa la extensión del mapa.');
 }
 
-function maskAndScaleL7SR(image) {
-  var qaPixel = image.select('QA_PIXEL');
-
-  // Máscara de nubosidad/sombra en C2 L2
-  var dilatedCloud = qaPixel.bitwiseAnd(1 << 1).neq(0);
-  var cloud = qaPixel.bitwiseAnd(1 << 3).neq(0);
-  var cloudShadow = qaPixel.bitwiseAnd(1 << 4).neq(0);
-
-  // L7: bit 9 en QA_RADSAT = dropped pixel (SLC-off / inválido)
-  var dropped = image.select('QA_RADSAT').bitwiseAnd(1 << 9).neq(0);
-
-  var mask = dilatedCloud.or(cloud).or(cloudShadow).or(dropped).not();
-
-  // Escalado oficial SR para Collection 2 Level 2
-  var scaled = image.select(['SR_B2', 'SR_B5'], ['GREEN', 'SWIR1'])
-    .multiply(0.0000275)
-    .add(-0.2)
-    .updateMask(mask);
-
-  return scaled.copyProperties(image, image.propertyNames());
-}
-
-function calculateNDSI(image) {
+function addNDSI(image) {
   var ndsi = image.normalizedDifference(['GREEN', 'SWIR1']).rename('NDSI');
   return image.addBands(ndsi);
 }
 
-function processAndExportYear(year) {
-  var start = ee.Date.fromYMD(year, 1, 1);
-  var end = start.advance(1, 'year');
+function maskAndScaleL57(image) {
+  var qa = image.select('QA_PIXEL');
+  var dilatedCloud = qa.bitwiseAnd(1 << 1).neq(0);
+  var cloud = qa.bitwiseAnd(1 << 3).neq(0);
+  var cloudShadow = qa.bitwiseAnd(1 << 4).neq(0);
+  var dropped = image.select('QA_RADSAT').bitwiseAnd(1 << 9).neq(0);
 
-  var collection = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+  var mask = dilatedCloud.or(cloud).or(cloudShadow).or(dropped).not();
+
+  return image.select(['SR_B2', 'SR_B5'], ['GREEN', 'SWIR1'])
+    .multiply(0.0000275)
+    .add(-0.2)
+    .updateMask(mask)
+    .copyProperties(image, image.propertyNames());
+}
+
+function maskAndScaleL8(image) {
+  var qa = image.select('QA_PIXEL');
+  var dilatedCloud = qa.bitwiseAnd(1 << 1).neq(0);
+  var cloud = qa.bitwiseAnd(1 << 3).neq(0);
+  var cloudShadow = qa.bitwiseAnd(1 << 4).neq(0);
+  var saturated = image.select('QA_RADSAT').neq(0);
+
+  var mask = dilatedCloud.or(cloud).or(cloudShadow).or(saturated).not();
+
+  return image.select(['SR_B3', 'SR_B6'], ['GREEN', 'SWIR1'])
+    .multiply(0.0000275)
+    .add(-0.2)
+    .updateMask(mask)
+    .copyProperties(image, image.propertyNames());
+}
+
+function buildCollection(start, end) {
+  var l5 = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
     .filterDate(start, end)
     .filterBounds(studyArea)
-    .filter(ee.Filter.lt('CLOUD_COVER', 50))
-    .map(maskAndScaleL7SR)
-    .map(calculateNDSI);
+    .filter(ee.Filter.lt('CLOUD_COVER', cloudCoverMax))
+    .map(maskAndScaleL57);
 
+  var l7 = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+    .filterDate(start, end)
+    .filterBounds(studyArea)
+    .filter(ee.Filter.lt('CLOUD_COVER', cloudCoverMax))
+    .map(maskAndScaleL57);
+
+  var l8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+    .filterDate(start, end)
+    .filterBounds(studyArea)
+    .filter(ee.Filter.lt('CLOUD_COVER', cloudCoverMax))
+    .map(maskAndScaleL8);
+
+  return l5.merge(l7).merge(l8).map(addNDSI);
+}
+
+function processAndExportYear(year) {
+  var start = ee.Date.fromYMD(year, 1, 1).advance(-temporalPaddingYears, 'year');
+  var end = ee.Date.fromYMD(year + 1, 1, 1).advance(temporalPaddingYears, 'year');
+
+  var collection = buildCollection(start, end);
   var count = collection.size();
-  print('Año ' + year + ' - imágenes válidas:', count);
+  print('Año ' + year + ' - imágenes usadas:', count);
 
   var ndsiYear = ee.Image(
     ee.Algorithms.If(
       count.gt(0),
-      collection.select('NDSI').mean().clip(studyArea),
+      collection.select('NDSI')
+        .reduce(ee.Reducer.percentile([ndsiPercentile]))
+        .rename('NDSI')
+        .clip(studyArea),
       ee.Image(0).rename('NDSI').clip(studyArea).selfMask()
     )
   );
@@ -90,7 +131,7 @@ function processAndExportYear(year) {
   Map.addLayer(ndsiYear, ndsiVis, 'NDSI Chimborazo ' + year);
 
   Export.image.toDrive({
-    image: ndsiYear.toFloat(),
+    image: ndsiYear.unmask(noDataValue).toFloat(),
     description: 'Export_NDSI_Chimborazo_' + year,
     folder: 'Chimborazo',
     fileNamePrefix: 'NDSI_Chimborazo_' + year,
@@ -98,17 +139,16 @@ function processAndExportYear(year) {
     scale: 30,
     maxPixels: 1e13,
     crs: 'EPSG:4326',
-    fileFormat: 'GeoTIFF'
+    fileFormat: 'GeoTIFF',
+    formatOptions: {noData: noDataValue}
   });
 }
 
-var startYear = 2000;
-var endYear = 2013;
-
 Map.addLayer(studyArea, {color: 'red'}, 'AOI - Chimborazo');
-Map.centerObject(studyArea, 10);
+Map.centerObject(studyArea, 11);
 
-// Para tareas de exportación en GEE Code Editor, mejor loop cliente simple
 for (var year = startYear; year <= endYear; year++) {
   processAndExportYear(year);
 }
+
+print('TIP: para recortar más el área, pon useChimborazoPolygon = false y dibuja geometry con la herramienta de polígono.');
