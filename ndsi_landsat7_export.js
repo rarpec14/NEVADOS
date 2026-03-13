@@ -13,7 +13,8 @@ var ndsiVis = {
   palette: ['blue', 'white', 'green']
 };
 
-// --- Configuración principal ---
+// --- Configuración principal (solo flujo NDSI Landsat) ---
+var scriptId = 'IS_NDSI_LANDSAT7';
 var startYear = 2000;
 var endYear = 2013;
 var cloudCoverMax = 60;
@@ -151,4 +152,5 @@ for (var year = startYear; year <= endYear; year++) {
   processAndExportYear(year);
 }
 
+print('Script activo:', scriptId);
 print('TIP: para recortar más el área, pon useChimborazoPolygon = false y dibuja geometry con la herramienta de polígono.');
