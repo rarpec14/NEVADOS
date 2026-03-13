@@ -1,5 +1,6 @@
 // ==============================================
-// Cálculo y exportación anual de NDSI (Landsat 7 C2 L2 Surface Reflectance)
+// Cálculo y exportación anual de NDSI para nevado Chimborazo
+// (Landsat 7 C2 L2 Surface Reflectance)
 // ==============================================
 // Nota clave para SR (Surface Reflectance) en LE07/C02/T1_L2:
 // - GREEN = SR_B2
@@ -12,15 +13,29 @@ var ndsiVis = {
   palette: ['blue', 'white', 'green']
 };
 
-// Prioridad de AOI: geometry -> roi -> aoi -> extensión actual del mapa
-var studyArea = (typeof geometry !== 'undefined' && geometry) ||
-  (typeof roi !== 'undefined' && roi) ||
-  (typeof aoi !== 'undefined' && aoi) ||
-  null;
+// 1) AOI fijo: Chimborazo (puedes ajustar coordenadas si quieres un recorte más fino)
+var useChimborazoPolygon = true;
+var chimborazoPolygon = ee.Geometry.Polygon([
+  [
+    [-78.92, -1.40],
+    [-78.73, -1.40],
+    [-78.73, -1.62],
+    [-78.92, -1.62],
+    [-78.92, -1.40]
+  ]
+]);
+
+// Prioridad de AOI: Chimborazo -> geometry -> roi -> aoi -> extensión actual del mapa
+var studyArea = useChimborazoPolygon
+  ? chimborazoPolygon
+  : ((typeof geometry !== 'undefined' && geometry) ||
+    (typeof roi !== 'undefined' && roi) ||
+    (typeof aoi !== 'undefined' && aoi) ||
+    null);
 
 if (!studyArea) {
   studyArea = ee.Geometry.Rectangle(Map.getBounds(), null, false);
-  print('Aviso: no se encontró geometry/roi/aoi. Se usa la extensión actual del mapa.');
+  print('Aviso: no se encontró AOI. Se usa la extensión actual del mapa.');
 }
 
 function maskAndScaleL7SR(image) {
@@ -72,13 +87,13 @@ function processAndExportYear(year) {
     )
   );
 
-  Map.addLayer(ndsiYear, ndsiVis, 'NDSI ' + year);
+  Map.addLayer(ndsiYear, ndsiVis, 'NDSI Chimborazo ' + year);
 
   Export.image.toDrive({
     image: ndsiYear.toFloat(),
-    description: 'Export_NDSI_' + year,
-    folder: 'Denali',
-    fileNamePrefix: 'NDSI_' + year,
+    description: 'Export_NDSI_Chimborazo_' + year,
+    folder: 'Chimborazo',
+    fileNamePrefix: 'NDSI_Chimborazo_' + year,
     region: studyArea,
     scale: 30,
     maxPixels: 1e13,
@@ -90,7 +105,7 @@ function processAndExportYear(year) {
 var startYear = 2000;
 var endYear = 2013;
 
-Map.addLayer(studyArea, {color: 'red'}, 'AOI');
+Map.addLayer(studyArea, {color: 'red'}, 'AOI - Chimborazo');
 Map.centerObject(studyArea, 10);
 
 // Para tareas de exportación en GEE Code Editor, mejor loop cliente simple
