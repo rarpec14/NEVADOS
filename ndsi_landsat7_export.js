@@ -5,12 +5,25 @@
 // Para reducir parches sin datos (ej. 2002):
 // 1) fusiona L5/L7/L8,
 // 2) usa ventana temporal +/- años,
-// 3) usa percentil en vez de promedio.
+// 3) usa percentil en vez de promedio,
+// 4) integra ALTURA (DEM) como variable adicional.
 
 var ndsiVis = {
   min: -1,
   max: 1,
   palette: ['blue', 'white', 'green']
+};
+
+var classVis = {
+  min: 1,
+  max: 3,
+  palette: ['8c510a', '2166ac', 'f7f7f7'] // roca/suelo, glaciar, sin clase
+};
+
+var elevVis = {
+  min: 3500,
+  max: 6500,
+  palette: ['2c7bb6', 'abd9e9', 'ffffbf', 'fdae61', 'd7191c']
 };
 
 // --- Configuración principal (solo flujo NDSI Landsat) ---
@@ -21,6 +34,14 @@ var cloudCoverMax = 60;
 var temporalPaddingYears = 1; // 1 => usa [año-1, año+1]
 var ndsiPercentile = 60;
 var noDataValue = -9999;
+
+// Umbrales para clases
+var glacierNDSIThreshold = 0.4;
+var minElevationGlacierM = 4600; // ALTURA mínima para considerar glaciar
+
+// Exportaciones extra
+var exportElevationBand = true;    // exporta DEM recortado
+var exportClassBand = true;        // exporta clases (roca/suelo, glaciar, sin clase)
 
 // AOI
 // true: usa polígono fijo Chimborazo
@@ -50,6 +71,9 @@ if (!studyArea) {
   studyArea = ee.Geometry.Rectangle(Map.getBounds(), null, false);
   print('Aviso: no se encontró geometry/roi/aoi. Se usa la extensión del mapa.');
 }
+
+// Variable ALTURA (DEM)
+var elevation = ee.Image('USGS/SRTMGL1_003').select('elevation').clip(studyArea);
 
 function addNDSI(image) {
   var ndsi = image.normalizedDifference(['GREEN', 'SWIR1']).rename('NDSI');
@@ -110,6 +134,22 @@ function buildCollection(start, end) {
   return l5.merge(l7).merge(l8).map(addNDSI);
 }
 
+function buildClasses(ndsiImage, elevImage) {
+  // 1 = roca/suelo, 2 = glaciar, 3 = sin clase
+  var glacier = ndsiImage.gte(glacierNDSIThreshold)
+    .and(elevImage.gte(minElevationGlacierM));
+
+  var rockSoil = ndsiImage.lt(glacierNDSIThreshold)
+    .and(elevImage.gte(minElevationGlacierM));
+
+  return ee.Image(3)
+    .where(rockSoil, 1)
+    .where(glacier, 2)
+    .rename('CLASS')
+    .toByte()
+    .clip(studyArea);
+}
+
 function processAndExportYear(year) {
   var start = ee.Date.fromYMD(year, 1, 1).advance(-temporalPaddingYears, 'year');
   var end = ee.Date.fromYMD(year + 1, 1, 1).advance(temporalPaddingYears, 'year');
@@ -129,7 +169,12 @@ function processAndExportYear(year) {
     )
   );
 
+  var ndsiHighElevation = ndsiYear.updateMask(elevation.gte(minElevationGlacierM));
+  var classImage = buildClasses(ndsiYear, elevation);
+
   Map.addLayer(ndsiYear, ndsiVis, 'NDSI Chimborazo ' + year);
+  Map.addLayer(ndsiHighElevation, ndsiVis, 'NDSI alto (>' + minElevationGlacierM + 'm) ' + year, false);
+  Map.addLayer(classImage, classVis, 'Clases (1 roca, 2 glaciar, 3 sin clase) ' + year, false);
 
   Export.image.toDrive({
     image: ndsiYear.unmask(noDataValue).toFloat(),
@@ -143,14 +188,46 @@ function processAndExportYear(year) {
     fileFormat: 'GeoTIFF',
     formatOptions: {noData: noDataValue}
   });
+
+  if (exportClassBand) {
+    Export.image.toDrive({
+      image: classImage.unmask(3).toByte(),
+      description: 'Export_CLASS_Chimborazo_' + year,
+      folder: 'Chimborazo',
+      fileNamePrefix: 'CLASS_Chimborazo_' + year,
+      region: studyArea,
+      scale: 30,
+      maxPixels: 1e13,
+      crs: 'EPSG:4326',
+      fileFormat: 'GeoTIFF',
+      formatOptions: {noData: 3}
+    });
+  }
 }
 
 Map.addLayer(studyArea, {color: 'red'}, 'AOI - Chimborazo');
+Map.addLayer(elevation, elevVis, 'ALTURA (m)', false);
 Map.centerObject(studyArea, 11);
 
 for (var year = startYear; year <= endYear; year++) {
   processAndExportYear(year);
 }
 
+if (exportElevationBand) {
+  Export.image.toDrive({
+    image: elevation.toInt16(),
+    description: 'Export_ELEVATION_Chimborazo',
+    folder: 'Chimborazo',
+    fileNamePrefix: 'ELEVATION_Chimborazo',
+    region: studyArea,
+    scale: 30,
+    maxPixels: 1e13,
+    crs: 'EPSG:4326',
+    fileFormat: 'GeoTIFF',
+    formatOptions: {noData: -32768}
+  });
+}
+
 print('Script activo:', scriptId);
+print('ALTURA integrada: minElevationGlacierM =', minElevationGlacierM);
 print('TIP: para recortar más el área, pon useChimborazoPolygon = false y dibuja geometry con la herramienta de polígono.');
